@@ -88,7 +88,6 @@ TreeFunctions::CreateVariableNode(const char* name, PRJM_EVAL_F initialValue, pr
 void TreeFunctions::SetUp()
 {
     Test::SetUp();
-
 }
 
 void TreeFunctions::TearDown()
@@ -97,6 +96,7 @@ void TreeFunctions::TearDown()
     {
         prjm_eval_destroy_exptreenode(node);
     }
+    m_treeNodes.clear();
 
     for (const auto var: m_variables)
     {
@@ -104,6 +104,12 @@ void TreeFunctions::TearDown()
         delete var;
     }
     m_variables.clear();
+
+    if (m_memoryBuffer != nullptr)
+    {
+        prjm_eval_memory_destroy_buffer(m_memoryBuffer);
+        m_memoryBuffer = nullptr;
+    }
 
     Test::TearDown();
 
@@ -138,7 +144,7 @@ TEST_F(TreeFunctions, Variable)
     ASSERT_EQ(valuePointer, &var->value);
 }
 
-TEST_F(TreeFunctions, DISABLED_ExecuteList)
+TEST_F(TreeFunctions, ExecuteList)
 {
 
     // Expression list ("x = -50; y = 50;")
@@ -161,10 +167,15 @@ TEST_F(TreeFunctions, DISABLED_ExecuteList)
     setNode2->args[0] = varNode2;
     setNode2->args[1] = constNode2;
 
+    auto* listItem = new prjm_eval_exptreenode_list_item_t{};
+    listItem->expr = setNode1;
+    listItem->next = new prjm_eval_exptreenode_list_item_t{};
+    listItem->next->expr = setNode2;
+
     // Executor
     auto* listNode = CreateEmptyNode(1);
     listNode->func = prjm_eval_func_execute_list;
-    listNode->args[0] = setNode1;
+    listNode->list = listItem;
 
     m_treeNodes.push_back(listNode);
 
@@ -172,12 +183,246 @@ TEST_F(TreeFunctions, DISABLED_ExecuteList)
     PRJM_EVAL_F* valuePointer = &value;
     listNode->func(listNode, &valuePointer);
 
+    // Last executed node (y = 50) is return value
     EXPECT_PRJM_F_EQ(*valuePointer, 50.);
+
+    // Both constants should now be assigned to each respective variable
     EXPECT_PRJM_F_EQ(var1->value, -50.);
     EXPECT_PRJM_F_EQ(var2->value, 50.);
 }
 
-TEST_F(TreeFunctions, Set)
+TEST_F(TreeFunctions, ExecuteLoop)
+{
+    // Test expression: "loop(42, x += 1)" with x starting at 0.
+    prjm_eval_variable_def_t* varX;
+    auto* varNodeX = CreateVariableNode("x", 0.f, &varX);
+    auto* constNode1 = CreateConstantNode(1.0f);
+    auto* constNode42 = CreateConstantNode(42.0f);
+
+    auto* incrementNode1 = CreateEmptyNode(2);
+    incrementNode1->func = prjm_eval_func_add_op;
+    incrementNode1->args[0] = varNodeX;
+    incrementNode1->args[1] = constNode1;
+
+    // Executor
+    auto* loopNode = CreateEmptyNode(2);
+    loopNode->func = prjm_eval_func_execute_loop;
+    loopNode->args[0] = constNode42;
+    loopNode->args[1] = incrementNode1;
+
+    m_treeNodes.push_back(loopNode);
+
+    PRJM_EVAL_F value{};
+    PRJM_EVAL_F* valuePointer = &value;
+    loopNode->func(loopNode, &valuePointer);
+
+    // Last executed node ("41 += 1" resulting in 42) is return value
+    EXPECT_PRJM_F_EQ(*valuePointer, 42.);
+    EXPECT_PRJM_F_EQ(varX->value, 42.);
+}
+
+TEST_F(TreeFunctions, ExecuteWhile)
+{
+    // Test expression: "while(x -= 1)" with x starting at 42.
+    prjm_eval_variable_def_t* varX;
+    auto* varNodeX = CreateVariableNode("x", 42.f, &varX);
+    auto* constNode1 = CreateConstantNode(1.0f);
+
+    auto* decrementNode1 = CreateEmptyNode(2);
+    decrementNode1->func = prjm_eval_func_sub_op;
+    decrementNode1->args[0] = varNodeX;
+    decrementNode1->args[1] = constNode1;
+
+    // Executor
+    auto* whileNode = CreateEmptyNode(1);
+    whileNode->func = prjm_eval_func_execute_while;
+    whileNode->args[0] = decrementNode1;
+
+    m_treeNodes.push_back(whileNode);
+
+    PRJM_EVAL_F value{};
+    PRJM_EVAL_F* valuePointer = &value;
+    whileNode->func(whileNode, &valuePointer);
+
+    // Last executed node ("1 -= 1" resulting in 0) is return value
+    EXPECT_PRJM_F_EQ(*valuePointer, 0.);
+    EXPECT_PRJM_F_EQ(varX->value, 0.);
+}
+
+TEST_F(TreeFunctions, If)
+{
+    // Test expression: "if(x < 10, 42, 666)"
+    prjm_eval_variable_def_t* varX;
+    auto* varNodeX = CreateVariableNode("x", 0.f, &varX);
+    auto* constNode10 = CreateConstantNode(10.0f);
+    auto* constNode42 = CreateConstantNode(42.0f);
+    auto* constNode666 = CreateConstantNode(999.0f);
+
+    auto* comparisonNode = CreateEmptyNode(2);
+    comparisonNode->func = prjm_eval_func_below;
+    comparisonNode->args[0] = varNodeX;
+    comparisonNode->args[1] = constNode10;
+
+    auto* ifNode = CreateEmptyNode(3);
+    ifNode->func = prjm_eval_func_if;
+    ifNode->args[0] = comparisonNode;
+    ifNode->args[1] = constNode42;
+    ifNode->args[2] = constNode666;
+
+    m_treeNodes.push_back(ifNode);
+
+    PRJM_EVAL_F value{};
+    PRJM_EVAL_F* valuePointer = &value;
+    ifNode->func(ifNode, &valuePointer);
+
+    EXPECT_PRJM_F_EQ(*valuePointer, constNode42->value);
+
+    varX->value = 1000.;
+
+    ifNode->func(ifNode, &valuePointer);
+
+    EXPECT_PRJM_F_EQ(*valuePointer, constNode666->value);
+}
+
+TEST_F(TreeFunctions, IfWithReferenceReturn)
+{
+    // Test expression: "if(x < 10, 42, y) = 666"
+    // Assigns 666 to variable y if x >= 10
+    prjm_eval_variable_def_t* varX;
+    auto* varNodeX = CreateVariableNode("x", 0., &varX);
+    prjm_eval_variable_def_t* varY;
+    auto* varNodeY = CreateVariableNode("y", 999., &varY);
+    auto* constNode10 = CreateConstantNode(10.);
+    auto* constNode42 = CreateConstantNode(42.);
+    auto* constNode666 = CreateConstantNode(666.);
+
+    auto* comparisonNode = CreateEmptyNode(2);
+    comparisonNode->func = prjm_eval_func_below;
+    comparisonNode->args[0] = varNodeX;
+    comparisonNode->args[1] = constNode10;
+
+    auto* ifNode = CreateEmptyNode(3);
+    ifNode->func = prjm_eval_func_if;
+    ifNode->args[0] = comparisonNode;
+    ifNode->args[1] = constNode42;
+    ifNode->args[2] = varNodeY;
+
+    auto* setNode = CreateEmptyNode(2);
+    setNode->func = prjm_eval_func_set;
+    setNode->args[0] = ifNode;
+    setNode->args[1] = constNode666;
+
+    m_treeNodes.push_back(setNode);
+
+    PRJM_EVAL_F value{};
+    PRJM_EVAL_F* valuePointer = &value;
+    setNode->func(setNode, &valuePointer);
+
+    EXPECT_PRJM_F_EQ(*valuePointer, constNode666->value);
+    EXPECT_PRJM_F_EQ(varY->value, 999.);
+
+    varX->value = 1000.;
+
+    setNode->func(setNode, &valuePointer);
+
+    EXPECT_PRJM_F_EQ(*valuePointer, constNode666->value);
+    EXPECT_PRJM_F_EQ(varY->value, constNode666->value);
+}
+
+TEST_F(TreeFunctions, Execute2)
+{
+    // Expression: "exec2(x = -50, y = 50)"
+    // Syntactically identical to just writing "x = -50; y = 50"
+    prjm_eval_variable_def_t* var1;
+    auto* varNode1 = CreateVariableNode("x", 5.f, &var1);
+    auto* constNode1 = CreateConstantNode(-50.0f);
+
+    auto* setNode1 = CreateEmptyNode(2);
+    setNode1->func = prjm_eval_func_set;
+    setNode1->args[0] = varNode1;
+    setNode1->args[1] = constNode1;
+
+    prjm_eval_variable_def_t* var2;
+    auto* varNode2 = CreateVariableNode("y", 123.f, &var2);
+    auto* constNode2 = CreateConstantNode(50.0f);
+
+    auto* setNode2 = CreateEmptyNode(2);
+    setNode2->func = prjm_eval_func_set;
+    setNode2->args[0] = varNode2;
+    setNode2->args[1] = constNode2;
+
+    auto* exec2Node = CreateEmptyNode(2);
+    exec2Node->func = prjm_eval_func_exec2;
+    exec2Node->args[0] = setNode1;
+    exec2Node->args[1] = setNode2;
+
+    m_treeNodes.push_back(exec2Node);
+
+    PRJM_EVAL_F value{};
+    PRJM_EVAL_F* valuePointer = &value;
+    exec2Node->func(exec2Node, &valuePointer);
+
+    // Last executed node (y = 50) is return value
+    EXPECT_PRJM_F_EQ(*valuePointer, 50.);
+
+    // Both constants should now be assigned to each respective variable
+    EXPECT_PRJM_F_EQ(var1->value, -50.);
+    EXPECT_PRJM_F_EQ(var2->value, 50.);
+}
+
+TEST_F(TreeFunctions, Execute3)
+{
+    // Expression: "exec2(x = -50, y = 50)"
+    // Syntactically identical to just writing "x = -50; y = 50"
+    prjm_eval_variable_def_t* var1;
+    auto* varNode1 = CreateVariableNode("x", 5.f, &var1);
+    auto* constNode1 = CreateConstantNode(-50.0f);
+
+    auto* setNode1 = CreateEmptyNode(2);
+    setNode1->func = prjm_eval_func_set;
+    setNode1->args[0] = varNode1;
+    setNode1->args[1] = constNode1;
+
+    prjm_eval_variable_def_t* var2;
+    auto* varNode2 = CreateVariableNode("y", 123.f, &var2);
+    auto* constNode2 = CreateConstantNode(50.0f);
+
+    auto* setNode2 = CreateEmptyNode(2);
+    setNode2->func = prjm_eval_func_set;
+    setNode2->args[0] = varNode2;
+    setNode2->args[1] = constNode2;
+
+    prjm_eval_variable_def_t* var3;
+    auto* varNode3 = CreateVariableNode("z", 456.f, &var3);
+    auto* constNode3 = CreateConstantNode(200.0f);
+
+    auto* setNode3 = CreateEmptyNode(2);
+    setNode3->func = prjm_eval_func_set;
+    setNode3->args[0] = varNode3;
+    setNode3->args[1] = constNode3;
+
+    auto* exec3Node = CreateEmptyNode(3);
+    exec3Node->func = prjm_eval_func_exec3;
+    exec3Node->args[0] = setNode1;
+    exec3Node->args[1] = setNode2;
+    exec3Node->args[2] = setNode3;
+
+    m_treeNodes.push_back(exec3Node);
+
+    PRJM_EVAL_F value{};
+    PRJM_EVAL_F* valuePointer = &value;
+    exec3Node->func(exec3Node, &valuePointer);
+
+    // Last executed node (z = 200) is return value
+    EXPECT_PRJM_F_EQ(*valuePointer, 200.);
+
+    // All three constants should now be assigned to each respective variable
+    EXPECT_PRJM_F_EQ(var1->value, -50.);
+    EXPECT_PRJM_F_EQ(var2->value, 50.);
+    EXPECT_PRJM_F_EQ(var3->value, 200.);
+}
+
+TEST_F(TreeFunctions, Assignment)
 {
     prjm_eval_variable_def_t* var1;
     prjm_eval_variable_def_t* var2;
@@ -195,19 +440,127 @@ TEST_F(TreeFunctions, Set)
     PRJM_EVAL_F* valuePointer = &value;
     setNode->func(setNode, &valuePointer);
 
-    ASSERT_EQ(valuePointer, &var1->value);
-    ASSERT_NE(valuePointer, &var2->value);
+    EXPECT_EQ(valuePointer, &var1->value);
+    EXPECT_NE(valuePointer, &var2->value);
     EXPECT_PRJM_F_EQ(*valuePointer, 45.0);
     EXPECT_PRJM_F_EQ(var1->value, 45.0);
 }
 
+TEST_F(TreeFunctions, MemoryAccess)
+{
+    // Expression: "mem[42] = 59"
+    // megabuf(), gmem[] and gmegabuf() are equivalent, they only get different memory buffer pointers during compilation.
+    m_memoryBuffer = prjm_eval_memory_create_buffer();
+
+    auto* constNode42 = CreateConstantNode(42.);
+    auto* constNode50 = CreateConstantNode(50.0f);
+
+    auto* memNode = CreateEmptyNode(1);
+    memNode->func = prjm_eval_func_mem;
+    memNode->memory_buffer = m_memoryBuffer;
+    memNode->args[0] = constNode42;
+
+    auto* setNode = CreateEmptyNode(2);
+    setNode->func = prjm_eval_func_set;
+    setNode->args[0] = memNode;
+    setNode->args[1] = constNode50;
+
+    m_treeNodes.push_back(setNode);
+
+    PRJM_EVAL_F value{};
+    PRJM_EVAL_F* valuePointer = &value;
+    setNode->func(setNode, &valuePointer);
+
+    EXPECT_PRJM_F_EQ(*valuePointer, 50.0);
+
+    PRJM_EVAL_F* memoryPointer = prjm_eval_memory_allocate(m_memoryBuffer, static_cast<int>(constNode42->value));
+    ASSERT_NE(memoryPointer, nullptr);
+    EXPECT_EQ(*memoryPointer, 50.0);
+}
+
+TEST_F(TreeFunctions, FreeMemoryBuffer)
+{
+    // Expression: "freembuf(10)"
+    // No memory should be freed, as this function doesn't do anything in Milkdrop.
+    m_memoryBuffer = prjm_eval_memory_create_buffer();
+
+    auto* constNode10 = CreateConstantNode(10.);
+
+    auto* freembufNode = CreateEmptyNode(1);
+    freembufNode->func = prjm_eval_func_freembuf;
+    freembufNode->memory_buffer = m_memoryBuffer;
+    freembufNode->args[0] = constNode10;
+
+    m_treeNodes.push_back(freembufNode);
+
+    // 10th value in block 10
+    PRJM_EVAL_F* memoryPointer = prjm_eval_memory_allocate(m_memoryBuffer, 65536 * 10 + 10);
+    *memoryPointer = 123.;
+
+    PRJM_EVAL_F value{};
+    PRJM_EVAL_F* valuePointer = &value;
+    freembufNode->func(freembufNode, &valuePointer);
+
+    EXPECT_PRJM_F_EQ(*valuePointer, 10.);
+    EXPECT_PRJM_F_EQ(*memoryPointer, 123.);
+}
+
+TEST_F(TreeFunctions, MemoryCopyWithOverlap)
+{
+    // Expression: "memcpy(65536, 65636, 200)"
+    m_memoryBuffer = prjm_eval_memory_create_buffer();
+
+    auto* constNode65536 = CreateConstantNode(65536.);
+    auto* constNode65636 = CreateConstantNode(65636.);
+    auto* constNode200 = CreateConstantNode(200.);
+
+    auto* memcpyNode = CreateEmptyNode(3);
+    memcpyNode->func = prjm_eval_func_memcpy;
+    memcpyNode->memory_buffer = m_memoryBuffer;
+    memcpyNode->args[0] = constNode65536;
+    memcpyNode->args[1] = constNode65636;
+    memcpyNode->args[2] = constNode200;
+
+    m_treeNodes.push_back(memcpyNode);
+
+    // Populate the whole range (65536 to 65835) with increasing numbers
+    for (int index = 0; index < 300; ++index)
+    {
+        PRJM_EVAL_F* memoryPointer = prjm_eval_memory_allocate(m_memoryBuffer, 65536 + index);
+        ASSERT_NE(memoryPointer, nullptr);
+        *memoryPointer = static_cast<PRJM_EVAL_F>(index + 1);
+    }
+
+    PRJM_EVAL_F value{};
+    PRJM_EVAL_F* valuePointer = &value;
+    memcpyNode->func(memcpyNode, &valuePointer);
+
+    // Destination index is returned
+    EXPECT_PRJM_F_EQ(*valuePointer, constNode65536->value);
+
+    // Check memory, should now contain indices 101-300, followed by 201-300.
+    // Using assertions here to not spam the output with 300 errors if something failed.
+    for (int index = 0; index < 300; ++index)
+    {
+        PRJM_EVAL_F* memoryPointer = prjm_eval_memory_allocate(m_memoryBuffer, 65536 + index);
+        ASSERT_NE(memoryPointer, nullptr);
+        if (index < 200)
+        {
+            ASSERT_EQ(static_cast<int>(*memoryPointer), index + 101);
+        }
+        else
+        {
+            ASSERT_EQ(static_cast<int>(*memoryPointer), index + 1);
+        }
+    }
+}
 
 TEST_F(TreeFunctions, DivisionOperator)
 {
     prjm_eval_variable_def_t* var1;
     prjm_eval_variable_def_t* var2;
-    auto* varNode1 = CreateVariableNode("x", 5.f, &var1);
-    auto* varNode2 = CreateVariableNode("y", 2.f, &var2);
+    auto* varNode1 = CreateVariableNode("x", 5., &var1);
+    auto* varNode2 = CreateVariableNode("y", 2., &var2);
 
     auto* divNode = CreateEmptyNode(2);
     divNode->func = prjm_eval_func_div;
